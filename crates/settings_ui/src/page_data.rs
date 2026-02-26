@@ -8469,7 +8469,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         ]
     }
 
-    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 3] {
+    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Image Viewer",
@@ -8520,6 +8520,21 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                     pick: |settings_content| settings_content.workspace.drop_target_size.as_ref(),
                     write: |settings_content, value| {
                         settings_content.workspace.drop_target_size = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "External Open Behavior",
+                description: "Where files opened from outside Zed (Finder, `open` command) appear.",
+                field: Box::new(SettingField {
+                    json_path: Some("external_open_behavior"),
+                    pick: |settings_content| {
+                        settings_content.workspace.external_open_behavior.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content.workspace.external_open_behavior = value;
                     },
                 }),
                 metadata: None,
