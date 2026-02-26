@@ -1184,7 +1184,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
             let paths_with_position =
                 derive_paths_with_position(app_state.fs.as_ref(), request.open_paths).await;
 
-            if matches!(
+            let effective_behavior = if matches!(
                 external_open_behavior,
                 ExternalOpenBehavior::NewWindow | ExternalOpenBehavior::DedicatedWindow
             ) && request.diff_paths.is_empty()
@@ -1193,35 +1193,47 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     .iter()
                     .map(|p| p.path.clone())
                     .collect();
-                let existing_window: Option<WindowHandle<MultiWorkspace>> =
-                    cx.update(|cx| find_window_with_paths_open(&paths, cx));
-                if let Some(existing) = existing_window {
-                    let items = existing
-                        .update(cx, |multi_workspace, window, cx| {
-                            window.activate_window();
-                            let workspace_entity = multi_workspace.workspace().clone();
-                            workspace_entity.update(cx, |workspace, cx| {
-                                workspace.open_paths(
-                                    paths,
-                                    workspace::OpenOptions::default(),
-                                    None,
-                                    window,
-                                    cx,
-                                )
-                            })
-                        })?
-                        .await;
-                    navigate_to_positions(
-                        &existing,
-                        items.into_iter().map(|item| item.and_then(|r| r.ok())),
-                        &paths_with_position,
-                        cx,
-                    );
-                    return anyhow::Ok(());
-                }
-            }
 
-            match external_open_behavior {
+                let workspace_contains_paths = cx.update(|cx| {
+                    find_workspace_containing_paths(&paths, cx).is_some()
+                });
+
+                if workspace_contains_paths {
+                    ExternalOpenBehavior::CurrentWindow
+                } else {
+                    let existing_window: Option<WindowHandle<MultiWorkspace>> =
+                        cx.update(|cx| find_window_with_paths_open(&paths, cx));
+                    if let Some(existing) = existing_window {
+                        let items = existing
+                            .update(cx, |multi_workspace, window, cx| {
+                                window.activate_window();
+                                let workspace_entity = multi_workspace.workspace().clone();
+                                workspace_entity.update(cx, |workspace, cx| {
+                                    workspace.open_paths(
+                                        paths,
+                                        workspace::OpenOptions::default(),
+                                        None,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            })?
+                            .await;
+                        navigate_to_positions(
+                            &existing,
+                            items.into_iter().map(|item| item.and_then(|r| r.ok())),
+                            &paths_with_position,
+                            cx,
+                        );
+                        return anyhow::Ok(());
+                    }
+                    external_open_behavior
+                }
+            } else {
+                external_open_behavior
+            };
+
+            match effective_behavior {
                 ExternalOpenBehavior::CurrentWindow => {
                     let (_window, results) = open_paths_with_positions(
                         &paths_with_position,
@@ -1384,6 +1396,32 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         })
         .detach();
     }
+}
+
+fn find_workspace_containing_paths(
+    paths: &[PathBuf],
+    cx: &App,
+) -> Option<WindowHandle<MultiWorkspace>> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let Ok(multi_workspace) = window.read(cx) else {
+            continue;
+        };
+        let workspace = multi_workspace.workspace().read(cx);
+        let project = workspace.project().read(cx);
+
+        if project.visibility_for_paths(paths, false, cx).is_some() {
+            return Some(window);
+        }
+    }
+
+    None
 }
 
 fn find_window_with_paths_open(
