@@ -49,6 +49,11 @@ pub struct WorkspaceSettingsContent {
     /// Values: empty_tab, last_workspace, last_session, launchpad
     /// Default: last_session
     pub restore_on_startup: Option<RestoreOnStartupBehavior>,
+    /// Controls where files opened from outside Zed (Finder, `open` command, etc.) appear.
+    /// Does not affect files opened via the Zed CLI, which has its own `-n`/`-a` flags.
+    ///
+    /// Default: current_window
+    pub external_open_behavior: Option<ExternalOpenBehavior>,
     /// Whether to attempt to restore previous file's state when opening it again.
     /// The state is stored per pane.
     /// When disabled, defaults are applied instead of the state restoration.
@@ -374,6 +379,32 @@ impl CloseWindowWhenNoItems {
             CloseWindowWhenNoItems::KeepWindowOpen => false,
         }
     }
+}
+
+#[derive(
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    Debug,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalOpenBehavior {
+    /// Open files in the most relevant existing workspace window.
+    #[default]
+    CurrentWindow,
+    /// Always open files in a new window.
+    NewWindow,
+    /// Collect externally opened files in a single dedicated window,
+    /// leaving your project workspaces untouched.
+    DedicatedWindow,
 }
 
 #[derive(

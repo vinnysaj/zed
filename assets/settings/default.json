@@ -153,6 +153,15 @@
   // E.g. 0.25 == If you drop onto the top/bottom quarter of the pane a new vertical split will be used
   //              If you drop onto the left/right quarter of the pane a new horizontal split will be used
   "drop_target_size": 0.2,
+  // Controls where files opened from outside Zed (e.g. Finder, `open` command) appear.
+  // May take 3 values:
+  //  1. Open in the most relevant existing workspace window
+  //         "external_open_behavior": "current_window"
+  //  2. Always open in a new window
+  //         "external_open_behavior": "new_window"
+  //  3. Collect in a single dedicated window, leaving project workspaces untouched
+  //         "external_open_behavior": "dedicated_window"
+  "external_open_behavior": "current_window",
   // Whether the window should be closed when using 'close active item' on a window with no tabs.
   // May take 3 values:
   //  1. Use the current platform's convention
