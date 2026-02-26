@@ -259,6 +259,9 @@ pub struct RawOpenRequest {
 
 impl Global for OpenListener {}
 
+pub struct DedicatedExternalWindow(pub Option<WindowHandle<MultiWorkspace>>);
+impl Global for DedicatedExternalWindow {}
+
 impl OpenListener {
     pub fn new() -> (Self, UnboundedReceiver<RawOpenRequest>) {
         let (tx, rx) = mpsc::unbounded();

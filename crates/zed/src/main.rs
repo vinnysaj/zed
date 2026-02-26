@@ -21,7 +21,10 @@ use fs::{Fs, RealFs};
 use futures::{StreamExt, channel::oneshot, future};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
-use gpui::{App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, UpdateGlobal as _};
+use gpui::{
+    App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, UpdateGlobal as _,
+    WindowHandle,
+};
 use gpui_platform;
 
 use gpui_tokio::Tokio;
@@ -37,7 +40,7 @@ use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use parking_lot::Mutex;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
 use proto;
-use recent_projects::{RemoteSettings, open_remote_project};
+use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use session::{AppSession, Session};
 use settings::{BaseKeymap, Settings, SettingsStore, watch_config_file};
@@ -55,14 +58,15 @@ use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use util::{ResultExt, TryFutureExt, maybe};
 use uuid::Uuid;
 use workspace::{
-    AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
-    WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
+    AppState, ExternalOpenBehavior, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace,
+    Toast, WorkspaceSettings, WorkspaceStore, notifications::NotificationId,
+    restore_multiworkspace,
 };
 use zed::{
-    OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
-    derive_paths_with_position, edit_prediction_registry, handle_cli_connection,
-    handle_keymap_file_changes, handle_settings_file_changes, initialize_workspace,
-    open_paths_with_positions,
+    DedicatedExternalWindow, OpenListener, OpenRequest, RawOpenRequest, app_menus,
+    build_window_options, derive_paths_with_position, edit_prediction_registry,
+    handle_cli_connection, handle_keymap_file_changes, handle_settings_file_changes,
+    initialize_workspace, open_paths_with_positions,
 };
 
 use crate::zed::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
@@ -1174,21 +1178,147 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     let mut task = None;
     if !request.open_paths.is_empty() || !request.diff_paths.is_empty() {
         let app_state = app_state.clone();
+        let external_open_behavior = WorkspaceSettings::get_global(cx).external_open_behavior;
+
         task = Some(cx.spawn(async move |cx| {
             let paths_with_position =
                 derive_paths_with_position(app_state.fs.as_ref(), request.open_paths).await;
-            let (_window, results) = open_paths_with_positions(
-                &paths_with_position,
-                &request.diff_paths,
-                request.diff_all,
-                app_state,
-                workspace::OpenOptions::default(),
-                cx,
-            )
-            .await?;
-            for result in results.into_iter().flatten() {
-                if let Err(err) = result {
-                    log::error!("Error opening path: {err}",);
+
+            if matches!(
+                external_open_behavior,
+                ExternalOpenBehavior::NewWindow | ExternalOpenBehavior::DedicatedWindow
+            ) && request.diff_paths.is_empty()
+            {
+                let paths: Vec<PathBuf> = paths_with_position
+                    .iter()
+                    .map(|p| p.path.clone())
+                    .collect();
+                let existing_window: Option<WindowHandle<MultiWorkspace>> =
+                    cx.update(|cx| find_window_with_paths_open(&paths, cx));
+                if let Some(existing) = existing_window {
+                    let items = existing
+                        .update(cx, |multi_workspace, window, cx| {
+                            window.activate_window();
+                            let workspace_entity = multi_workspace.workspace().clone();
+                            workspace_entity.update(cx, |workspace, cx| {
+                                workspace.open_paths(
+                                    paths,
+                                    workspace::OpenOptions::default(),
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                            })
+                        })?
+                        .await;
+                    navigate_to_positions(
+                        &existing,
+                        items.into_iter().map(|item| item.and_then(|r| r.ok())),
+                        &paths_with_position,
+                        cx,
+                    );
+                    return anyhow::Ok(());
+                }
+            }
+
+            match external_open_behavior {
+                ExternalOpenBehavior::CurrentWindow => {
+                    let (_window, results) = open_paths_with_positions(
+                        &paths_with_position,
+                        &request.diff_paths,
+                        request.diff_all,
+                        app_state,
+                        workspace::OpenOptions::default(),
+                        cx,
+                    )
+                    .await?;
+                    for result in results.into_iter().flatten() {
+                        if let Err(err) = result {
+                            log::error!("Error opening path: {err}");
+                        }
+                    }
+                }
+                ExternalOpenBehavior::NewWindow => {
+                    let (_window, results) = open_paths_with_positions(
+                        &paths_with_position,
+                        &request.diff_paths,
+                        request.diff_all,
+                        app_state,
+                        workspace::OpenOptions {
+                            open_new_workspace: Some(true),
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .await?;
+                    for result in results.into_iter().flatten() {
+                        if let Err(err) = result {
+                            log::error!("Error opening path: {err}");
+                        }
+                    }
+                }
+                ExternalOpenBehavior::DedicatedWindow => {
+                    let dedicated = cx.update(|cx| {
+                        cx.try_global::<DedicatedExternalWindow>()
+                            .and_then(|d| d.0)
+                            .filter(|handle| {
+                                cx.windows()
+                                    .iter()
+                                    .any(|w| w.downcast::<MultiWorkspace>() == Some(*handle))
+                            })
+                    });
+
+                    if let Some(dedicated_window) = dedicated {
+                        let paths: Vec<PathBuf> = paths_with_position
+                            .iter()
+                            .map(|p| p.path.clone())
+                            .collect();
+                        let items = dedicated_window
+                            .update(cx, |multi_workspace, window, cx| {
+                                window.activate_window();
+                                let workspace_entity = multi_workspace.workspace().clone();
+                                workspace_entity.update(cx, |workspace, cx| {
+                                    workspace.open_paths(
+                                        paths,
+                                        workspace::OpenOptions::default(),
+                                        None,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            })?
+                            .await;
+
+                        navigate_to_positions(
+                            &dedicated_window,
+                            items.into_iter().map(|item| {
+                                item.and_then(|r| r.ok())
+                            }),
+                            &paths_with_position,
+                            cx,
+                        );
+                    } else {
+                        let (window, results) = open_paths_with_positions(
+                            &paths_with_position,
+                            &request.diff_paths,
+                            request.diff_all,
+                            app_state,
+                            workspace::OpenOptions {
+                                open_new_workspace: Some(true),
+                                ..Default::default()
+                            },
+                            cx,
+                        )
+                        .await?;
+                        cx.update(|cx| {
+                            cx.set_global(DedicatedExternalWindow(Some(window)));
+                        });
+                        for result in results.into_iter().flatten() {
+                            if let Err(err) = result {
+                                log::error!("Error opening path: {err}");
+                            }
+                        }
+                    }
                 }
             }
             anyhow::Ok(())
@@ -1254,6 +1384,52 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         })
         .detach();
     }
+}
+
+fn find_window_with_paths_open(
+    paths: &[PathBuf],
+    cx: &App,
+) -> Option<WindowHandle<MultiWorkspace>> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    let canonical_paths: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    if canonical_paths.len() != paths.len() {
+        return None;
+    }
+
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let Ok(multi_workspace) = window.read(cx) else {
+            continue;
+        };
+        let workspace = multi_workspace.workspace().read(cx);
+        let project = workspace.project().read(cx);
+
+        let open_abs_paths: Vec<PathBuf> = workspace
+            .items(cx)
+            .filter_map(|item| {
+                let project_path = item.project_path(cx)?;
+                project.absolute_path(&project_path, cx)
+            })
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect();
+
+        if canonical_paths
+            .iter()
+            .all(|path| open_abs_paths.contains(path))
+        {
+            return Some(window);
+        }
+    }
+
+    None
 }
 
 async fn authenticate(client: Arc<Client>, cx: &AsyncApp) -> Result<()> {
